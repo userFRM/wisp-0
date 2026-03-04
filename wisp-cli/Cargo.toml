@@ -1,0 +1,10 @@
+[package]
+name = "wisp-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+wisp-net = { path = "../wisp-net" }
+tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt-multi-thread", "fs"] }
+clap = { version = "4", features = ["derive"] }

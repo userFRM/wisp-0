@@ -1,0 +1,3 @@
+[workspace]
+members = ["wisp-core", "wisp-net", "wisp-cli", "wisp-vectors"]
+resolver = "2"

@@ -1,0 +1,1633 @@
+
+
+
+
+
+Internet-Draft                                            WISP-0 CSR/0
+Intended status: Experimental                              March 2026
+Expires: September 2026
+
+
+          WISP-0: Wire-level Incremental Sync Protocol
+                   with CSR/0 Profile
+
+Abstract
+
+   This document specifies WISP-0 (Wire-level Incremental Sync
+   Protocol, version 0), an application-layer protocol for efficient
+   incremental synchronization of opaque binary objects.  WISP-0
+   combines content-defined chunking (CDC), set reconciliation via
+   Invertible Count Tables (ICT), and rateless fountain coding (SSX)
+   to achieve bandwidth-efficient delta transfers over heterogeneous
+   transport.
+
+   The CSR/0 profile defines concrete algorithms and parameters:
+   a Rabin-variant rolling hash chunker, a 3-hash ICT with SHA-256
+   derived indices, and a sparse systematic fountain code with
+   GF(2) Gaussian elimination decoding.
+
+   Control messages flow over a reliable ordered channel (C0/TCP)
+   while bulk data flows over an unreliable datagram channel
+   (D0/UDP), enabling high-throughput one-way data transfer with
+   minimal round trips.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.  This document may not be
+   modified, and derivative works of it may not be created, except
+   to format it for publication as an RFC or to translate it into
+   languages other than English.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.
+
+   Internet-Drafts are draft documents valid for a maximum of six
+   months and may be updated, replaced, or obsoleted by other
+   documents at any time.  It is inappropriate to use Internet-
+   Drafts as reference material or to cite them other than as
+   "work in progress."
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  Terminology . . . . . . . . . . . . . . . . . . . . . . .   4
+   3.  Protocol Overview . . . . . . . . . . . . . . . . . . . .   5
+   4.  Data Model  . . . . . . . . . . . . . . . . . . . . . . .   7
+     4.1.  Chunk Identifier (ChunkId)  . . . . . . . . . . . . .   7
+     4.2.  Digest (Digest32) . . . . . . . . . . . . . . . . . .   7
+     4.3.  Recipe  . . . . . . . . . . . . . . . . . . . . . . .   7
+     4.4.  Recipe Digest . . . . . . . . . . . . . . . . . . . .   8
+   5.  Content-Defined Chunking (CSR/0)  . . . . . . . . . . . .   8
+     5.1.  Rolling Hash  . . . . . . . . . . . . . . . . . . . .   8
+     5.2.  Boundary Detection  . . . . . . . . . . . . . . . . .   9
+     5.3.  Parameters  . . . . . . . . . . . . . . . . . . . . .   9
+   6.  Recipe Wire Format  . . . . . . . . . . . . . . . . . . .  10
+     6.1.  RecipeWire/0  . . . . . . . . . . . . . . . . . . . .  10
+     6.2.  RecipeOps/0 Delta Format  . . . . . . . . . . . . . .  10
+   7.  Invertible Count Table (ICT/0)  . . . . . . . . . . . . .  11
+     7.1.  Table Structure . . . . . . . . . . . . . . . . . . .  11
+     7.2.  Hash Functions  . . . . . . . . . . . . . . . . . . .  12
+     7.3.  Table Sizing  . . . . . . . . . . . . . . . . . . . .  12
+     7.4.  Insert  . . . . . . . . . . . . . . . . . . . . . . .  13
+     7.5.  Subtract  . . . . . . . . . . . . . . . . . . . . . .  13
+     7.6.  Peel  . . . . . . . . . . . . . . . . . . . . . . . .  13
+     7.7.  ICT Wire Format . . . . . . . . . . . . . . . . . . .  14
+   8.  Fountain Coding (SSX/0) . . . . . . . . . . . . . . . . .  14
+     8.1.  Source Symbols  . . . . . . . . . . . . . . . . . . .  14
+     8.2.  PRNG  . . . . . . . . . . . . . . . . . . . . . . . .  15
+     8.3.  Seed Derivation . . . . . . . . . . . . . . . . . . .  15
+     8.4.  Degree Distribution . . . . . . . . . . . . . . . . .  15
+     8.5.  Index Selection . . . . . . . . . . . . . . . . . . .  16
+     8.6.  Encoding  . . . . . . . . . . . . . . . . . . . . . .  16
+     8.7.  Decoding  . . . . . . . . . . . . . . . . . . . . . .  16
+   9.  Frame Format  . . . . . . . . . . . . . . . . . . . . . .  17
+     9.1.  Frame Header  . . . . . . . . . . . . . . . . . . . .  17
+     9.2.  Frame Types . . . . . . . . . . . . . . . . . . . . .  18
+     9.3.  Control Frames (chan = 0) . . . . . . . . . . . . . .  18
+     9.4.  Data Frames (chan = 1)  . . . . . . . . . . . . . . .  23
+   10. Transport Binding . . . . . . . . . . . . . . . . . . . .  24
+     10.1. C0 Channel (TCP)  . . . . . . . . . . . . . . . . . .  24
+     10.2. D0 Channel (UDP)  . . . . . . . . . . . . . . . . . .  24
+   11. Protocol State Machine  . . . . . . . . . . . . . . . . .  25
+     11.1. Session Establishment . . . . . . . . . . . . . . . .  25
+     11.2. Update Cycle  . . . . . . . . . . . . . . . . . . . .  26
+     11.3. Sender State Machine  . . . . . . . . . . . . . . . .  26
+     11.4. Receiver State Machine  . . . . . . . . . . . . . . .  28
+   12. VARINT Encoding . . . . . . . . . . . . . . . . . . . . .  29
+   13. Operational Semantics . . . . . . . . . . . . . . . . . .  30
+     13.1. Adaptive Timeouts . . . . . . . . . . . . . . . . . .  30
+     13.2. D0 Flow Control . . . . . . . . . . . . . . . . . . .  31
+     13.3. NEEDMORE Semantics  . . . . . . . . . . . . . . . . .  31
+   14. Security Considerations . . . . . . . . . . . . . . . . .  32
+     14.1. X25519-PSK-HKDF Authentication . . . . . . . . . . .  32
+     14.2. HMAC-SHA256-128 Frame Authentication  . . . . . . . .  33
+     14.3. Replay Protection . . . . . . . . . . . . . . . . . .  34
+     14.4. Session Limits  . . . . . . . . . . . . . . . . . . .  35
+     14.5. Per-IP Auth Rate Limiting . . . . . . . . . . . . . .  35
+     14.6. Anti-Downgrade Protection . . . . . . . . . . . . . .  35
+     14.7. Key Identity  . . . . . . . . . . . . . . . . . . . .  36
+     14.8. Zeroize . . . . . . . . . . . . . . . . . . . . . . .  36
+     14.9. Data Integrity Considerations . . . . . . . . . . . .  37
+   15. IANA Considerations . . . . . . . . . . . . . . . . . . .  38
+   16. References  . . . . . . . . . . . . . . . . . . . . . . .  38
+     16.1. Normative References  . . . . . . . . . . . . . . . .  38
+     16.2. Informative References  . . . . . . . . . . . . . . .  39
+   Appendix A.  Conformance Vectors  . . . . . . . . . . . . . .  40
+   Appendix B.  Design Rationale . . . . . . . . . . . . . . . .  41
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . .  42
+
+
+1.  Introduction
+
+   Modern distributed systems frequently synchronize large binary
+   objects (firmware images, databases, container layers, machine
+   learning model weights) across networks with varying quality of
+   service.  Existing delta-sync protocols such as rsync [RSYNC]
+   require multiple round trips for checksum negotiation, while
+   content-addressed storage systems such as IPFS [IPFS] transfer
+   entire content-addressed blocks even when only a small fraction
+   has changed.
+
+   WISP-0 addresses these limitations by combining three
+   complementary techniques into a single coherent protocol:
+
+   1. Content-Defined Chunking (CDC) splits objects into
+      variable-size chunks at content-determined boundaries,
+      ensuring that local modifications produce localized chunk
+      changes rather than cascading re-chunking.
+
+   2. Invertible Count Tables (ICT) enable single-round-trip set
+      reconciliation: the receiver sends a compact sketch of its
+      held chunk set, and the sender extracts the exact set of
+      missing chunk identifiers without enumerating the full sets.
+
+   3. Systematic Fountain Coding (SSX) provides rateless erasure
+      coding for bulk transfer over unreliable channels.  The
+      sender transmits systematic symbols (original data) followed
+      by coded repair symbols (XOR mixtures).  The receiver can
+      recover from arbitrary packet loss patterns without
+      retransmission requests.
+
+   The protocol separates control signaling (session management,
+   recipe exchange, synchronization) onto a reliable ordered
+   transport (C0/TCP) from bulk data transfer onto an unreliable
+   datagram transport (D0/UDP).  This dual-channel design
+   minimizes head-of-line blocking while ensuring protocol
+   correctness.
+
+   The CSR/0 profile (Chunking-Sketch-Rateless, version 0)
+   specifies concrete algorithm choices and parameter values,
+   enabling interoperable implementations.  The framing format
+   includes a capsule_id field that allows future profiles to
+   coexist on the same transport.
+
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL
+   NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED",
+   "MAY", and "OPTIONAL" in this document are to be interpreted as
+   described in BCP 14 [RFC2119] [RFC8174] when, and only when,
+   they appear in all capitals, as shown here.
+
+   Object:  An opaque byte sequence to be synchronized.
+
+   Chunk:  A contiguous subsequence of an Object, produced by
+      content-defined chunking.
+
+   ChunkId:  A 16-byte identifier derived from the content of a
+      Chunk: the first 16 bytes of SHA-256(chunk_data).
+
+   Recipe:  An ordered sequence of (ChunkId, chunk_len) pairs
+      that fully describes the decomposition of an Object.
+
+   Recipe Digest (H_recipe):  SHA-256(RecipeWire(recipe)), a
+      32-byte hash that uniquely identifies a specific Object
+      version.
+
+   H128(data):  The first 16 bytes of SHA-256(data).
+
+   H256(data):  SHA-256(data), yielding 32 bytes.
+
+   Sender:  The party that holds the target (newer) Object
+      version and initiates the update transfer.
+
+   Receiver:  The party that holds the base (older) Object
+      version and receives the update.
+
+   Source Symbol:  A fixed-size (1024-byte) block derived from
+      the serialized missing chunks.  The fundamental unit of
+      fountain coding.
+
+   Coded Symbol:  A source symbol XOR-mixed with other source
+      symbols according to the SSX/0 degree distribution.
+
+   C0:  The reliable, ordered control channel (TCP).
+
+   D0:  The unreliable datagram data channel (UDP).
+
+   ULEB128:  Unsigned Little-Endian Base 128 variable-length
+      integer encoding.
+
+   ICT:  Invertible Count Table, a probabilistic data structure
+      for set reconciliation.
+
+
+3.  Protocol Overview
+
+   A WISP-0 synchronization session proceeds in phases:
+
+   Phase 1: Session Establishment
+      Both endpoints exchange HELLO frames on C0, negotiating
+      capabilities (maximum payload sizes, ICT table limits,
+      fountain symbol counts, supported capsule profiles).
+      The sender then sends a SELECT frame to choose the
+      active capsule profile.
+
+   Phase 2: Recipe Exchange
+      The sender computes the target Recipe (by chunking the
+      target Object), then sends an OFFER frame containing
+      H_target (the recipe digest) and RecipeOps (a compact
+      delta from the base recipe to the target recipe).  The
+      receiver applies RecipeOps to reconstruct the target
+      Recipe and verifies H_target.
+
+   Phase 3: Set Reconciliation
+      The receiver builds two ICTs with matching m_log2: a
+      target ICT (all target ChunkIds) and a have ICT (ChunkIds
+      present in both base and target).  It computes the
+      difference table (target_ict - have_ict) and sends this
+      difference ICT to the sender via HAVE_ICT.  The sender
+      peels the received difference ICT directly to obtain
+      the exact missing set.
+
+   Phase 4: Bulk Transfer
+      The sender serializes the missing chunks into source
+      symbols, sends a PLAN frame (declaring symbol count and
+      a digest of the missing list), then transmits:
+      - SYM frames: one per source symbol (systematic, D0)
+      - MIX frames: coded repair symbols (rateless, D0)
+      The receiver feeds incoming SYM and MIX frames into a
+      sparse GF(2) Gaussian elimination decoder until all
+      source symbols are recovered.
+
+   Phase 5: Commit
+      The receiver reconstructs chunks from decoded symbols,
+      verifies each chunk's hash, reassembles the target
+      Object in recipe order, and sends COMMIT(H_target).
+      The sender verifies the digest and replies with ACK.
+
+   The protocol supports NEEDMORE: if the receiver's decoder
+   is incomplete after the initial burst, it sends NEEDMORE
+   with the next expected fountain index, and the sender
+   resumes MIX transmission.
+
+   If any integrity check fails at any point, the receiver
+   sends a FORK frame with the expected and observed digests
+   to signal divergence.
+
+
+4.  Data Model
+
+4.1.  Chunk Identifier (ChunkId)
+
+   A ChunkId is a 16-byte value computed as:
+
+      ChunkId = SHA-256(chunk_data)[0..16]
+
+   This is the first 16 bytes (128 bits) of the SHA-256 hash
+   of the chunk's byte content.  The truncation to 128 bits
+   provides a collision probability of approximately 2^{-64}
+   under the birthday bound for collections up to 2^{64}
+   chunks, which is sufficient for practical use.
+
+   ChunkIds are compared byte-for-byte.  Two chunks with the
+   same ChunkId MUST contain identical byte content.
+
+4.2.  Digest (Digest32)
+
+   A Digest32 is a full 32-byte SHA-256 hash.  It is used for
+   recipe digests and base_digest fields in frame headers.
+
+4.3.  Recipe
+
+   A Recipe is an ordered list of RecipeEntry records:
+
+      RecipeEntry = {
+          chunk_id:  ChunkId   (16 bytes)
+          chunk_len: uint64    (ULEB128 on wire)
+      }
+
+   The Recipe defines the exact decomposition of an Object:
+   concatenating the chunks in recipe order, each truncated to
+   chunk_len bytes, reproduces the original Object byte-for-
+   byte.
+
+   The same ChunkId MAY appear multiple times in a Recipe
+   (deduplication), but each occurrence MUST have the same
+   chunk_len.
+
+4.4.  Recipe Digest
+
+   The Recipe Digest H_recipe is:
+
+      H_recipe = SHA-256(RecipeWire(recipe))
+
+   where RecipeWire is the binary encoding defined in
+   Section 6.1.
+
+   Two objects with the same Recipe Digest are considered
+   identical.
+
+
+5.  Content-Defined Chunking (CSR/0)
+
+   CSR/0 (Content-Segmentation via Rolling hash, version 0)
+   defines a specific CDC algorithm using a Rabin-variant
+   polynomial rolling hash.
+
+5.1.  Rolling Hash
+
+   The rolling hash maintains a sliding window of W bytes over
+   the input stream.  The hash state consists of:
+
+   - h: a 64-bit unsigned integer (wrapping arithmetic)
+   - ring: a circular buffer of W bytes
+   - ring_pos: current position in the ring buffer
+
+   The hash is updated for each input byte x_i:
+
+      y = ring[ring_pos]
+      h = h * B + x_i - y * POW     (mod 2^64, wrapping)
+      ring[ring_pos] = x_i
+      ring_pos = (ring_pos + 1) mod W
+
+   where:
+      B    = 257          (hash base)
+      W    = 48           (window size in bytes)
+      POW  = B^W mod 2^64 (precomputed constant)
+
+   The ring buffer and hash state persist across chunk
+   boundaries within a single chunking operation.  This
+   ensures CDC continuity: identical byte sequences preceded
+   by identical context produce identical chunk boundaries.
+
+5.2.  Boundary Detection
+
+   A chunk boundary is declared at byte position i when
+   either condition holds:
+
+   a) The current chunk size >= MIN and the hash satisfies
+      the mask test:
+
+         (h & MASK) == 0
+
+   b) The current chunk size == MAX (forced cut).
+
+   After a boundary, a new chunk begins at byte i+1.  Any
+   trailing bytes after the last boundary form a final chunk
+   regardless of size (there is no minimum size constraint
+   on the final chunk).
+
+5.3.  Parameters
+
+   The CSR/0 profile defines the following constants:
+
+      Parameter   Value    Description
+      ---------   -----    ----------------------------------
+      B           257      Rolling hash base
+      W           48       Window size (bytes)
+      K           16       Mask bit width
+      MIN         8192     Minimum chunk size (8 KiB)
+      MAX         262144   Maximum chunk size (256 KiB)
+      MASK        0xFFFF   Boundary mask = (1 << K) - 1
+
+   The expected average chunk size is approximately
+   2^K = 65,536 bytes (64 KiB), bounded by [MIN, MAX]
+   for interior chunks.
+
+
+6.  Recipe Wire Format
+
+6.1.  RecipeWire/0
+
+   The binary encoding of a Recipe:
+
+      Offset  Field            Encoding
+      ------  ---------------  -------------------------
+      0       recipe_version   uint8 (MUST be 0)
+      1       chunker_profile  uint8 (MUST be 0)
+      2       num_chunks       ULEB128
+      2+v     entries[]        repeated num_chunks times:
+                                 chunk_id:  16 bytes
+                                 chunk_len: ULEB128
+
+   Implementations MUST reject recipes with recipe_version
+   or chunker_profile values other than 0.
+
+6.2.  RecipeOps/0 Delta Format
+
+   RecipeOps encode the transformation from a base Recipe to
+   a target Recipe as a sequence of opcodes:
+
+      Opcode  Value  Parameters          Semantics
+      ------  -----  ------------------  ---------------------------
+      END     0x00   (none)              Terminate opcode stream
+      COPY    0x01   base_index: ULEB128 Copy entries[base_index..
+                     count:      ULEB128   base_index+count] from base
+      LIT     0x02   count: ULEB128      Literal entries follow:
+                     entries[count]:        chunk_id (16 bytes) +
+                                            chunk_len (ULEB128) each
+
+   The diff algorithm is greedy: it scans the target recipe
+   left-to-right, extending COPY runs from the base when
+   possible, and accumulating new entries as LIT when no match
+   exists.  The stream MUST end with an END opcode.
+
+   The apply algorithm processes opcodes sequentially,
+   building the target entry list:
+   - COPY: appends base.entries[base_index..base_index+count]
+   - LIT: appends the literal entries
+   - END: terminates
+
+
+7.  Invertible Count Table (ICT/0)
+
+   ICT/0 is a probabilistic data structure that enables
+   single-round-trip set reconciliation.  Given two sets
+   A (sender's target ChunkIds) and B (receiver's held
+   ChunkIds), the symmetric difference A \ B (missing keys)
+   can be recovered from the element-wise subtraction of
+   their ICT sketches.
+
+7.1.  Table Structure
+
+   An ICT consists of m = 2^{m_log2} cells, where m_log2
+   is a non-negative integer.  Each cell contains:
+
+      Field      Type     Size     Description
+      --------   ------   ------   -----------------------
+      count      int32    4 bytes  Signed insertion counter
+      key_xor    bytes16  16 bytes XOR accumulator of keys
+      hash_xor   uint64   8 bytes  XOR accumulator of hash64
+
+   Total cell size: 28 bytes.
+
+7.2.  Hash Functions
+
+   ICT/0 uses k=3 hash functions derived from SHA-256:
+
+   hash64(key):
+      Compute SHA-256(0x49 || key).
+      Return the first 8 bytes interpreted as uint64
+      little-endian.
+
+   hj(key, j, m):  for j in {0, 1, 2}
+      Compute SHA-256(byte(0xA0 + j) || key).
+      Return the first 8 bytes interpreted as uint64
+      little-endian, taken modulo m.
+
+   The prefix bytes (0x49 for hash64, 0xA0+j for hj)
+   provide domain separation between the hash functions.
+
+7.3.  Table Sizing
+
+   Given an estimate d_est of the number of missing keys
+   (i.e., target set size minus have set size, not the
+   target set size itself), the table size is computed as:
+
+      raw    = ceil(2.5 * d_est + 32)
+      m      = max(next_power_of_two(raw), 256)
+      m_log2 = log2(m)
+
+   This formula provides approximately 2.5x overhead
+   relative to the expected difference size, with a
+   minimum of 256 cells.  The maximum allowed m_log2 is
+   24 (16,777,216 cells, approximately 448 MiB).
+
+   Integer arithmetic equivalent (avoiding floating point):
+
+      raw    = (5 * d_est + 65) / 2   (integer division)
+      m      = max(next_power_of_two(raw), 256)
+
+7.4.  Insert
+
+   To insert a key (ChunkId) into the ICT:
+
+      h64 = hash64(key)
+      for j in 0..3:
+          idx = hj(key, j, m)
+          cells[idx].count   += 1
+          cells[idx].key_xor ^= key
+          cells[idx].hash_xor ^= h64
+
+7.5.  Subtract
+
+   To compute the difference D = A - B (element-wise):
+
+      REQUIRE A.m_log2 == B.m_log2
+      for i in 0..m:
+          D.cells[i].count    = A.cells[i].count   - B.cells[i].count
+          D.cells[i].key_xor  = A.cells[i].key_xor ^ B.cells[i].key_xor
+          D.cells[i].hash_xor = A.cells[i].hash_xor ^ B.cells[i].hash_xor
+
+7.6.  Peel
+
+   The peel algorithm recovers individual keys from a
+   difference table:
+
+   1. Scan all cells; push indices of "pure" cells onto
+      a stack.
+
+   2. A cell is pure if:
+         abs(count) == 1  AND  hash64(key_xor) == hash_xor
+
+   3. While the stack is non-empty:
+      a. Pop index i.  If cells[i].count == 0 or cells[i]
+         is no longer pure, skip.
+      b. Extract key = cells[i].key_xor, sign = cells[i].count.
+      c. If sign == +1, append key to the missing set.
+      d. Remove the key from the table:
+            h64 = hash64(key)
+            for j in 0..3:
+                idx = hj(key, j, m)
+                cells[idx].count   -= sign
+                cells[idx].key_xor ^= key
+                cells[idx].hash_xor ^= h64
+                if cells[idx] is now pure: push idx
+
+   4. After termination, verify all cells have count == 0.
+      If any non-zero cells remain, peel has failed (the
+      table was undersized for the actual difference).
+
+   Keys with sign == +1 are present in A but not B (the
+   missing set).  Keys with sign == -1 are present in B
+   but not A (extra keys, normally empty in WISP-0).
+
+7.7.  ICT Wire Format
+
+   The ICT is serialized for the HAVE_ICT frame as:
+
+      Offset  Field    Type     Size
+      ------  -------  ------   --------
+      0       m_log2   uint8    1 byte
+      1       rsv0     uint8    1 byte (MUST be 0)
+      2       rsv1     uint16   2 bytes LE (MUST be 0)
+      4       cells[]  IctCell  28 * 2^{m_log2} bytes
+
+   Each cell is encoded as:
+      count:    int32 LE (4 bytes)
+      key_xor:  bytes (16 bytes)
+      hash_xor: uint64 LE (8 bytes)
+
+
+8.  Fountain Coding (SSX/0)
+
+   SSX/0 (Sparse Systematic XOR, version 0) provides
+   rateless erasure coding for bulk data transfer.  It is
+   a systematic code: the first n transmitted symbols are
+   the original source symbols, followed by an unlimited
+   stream of coded repair symbols.
+
+8.1.  Source Symbols
+
+   Missing chunks are serialized into source symbols of
+   exactly L = 1024 bytes (SYMBOL_SIZE):
+
+   1. Order the missing chunks by first appearance in the
+      target Recipe.
+
+   2. For each chunk in order, split its data into
+      ceil(chunk_len / L) symbols.  The last symbol is
+      zero-padded to L bytes.  If chunk_len == 0, emit
+      one all-zero symbol.
+
+   3. Number the resulting symbols consecutively:
+      s_0, s_1, ..., s_{n-1}.
+
+   The total number of source symbols n is transmitted in
+   the PLAN frame.
+
+8.2.  PRNG
+
+   SSX/0 uses a SHA-256 hash chain as its deterministic
+   pseudorandom number generator:
+
+      State: block (32 bytes), pos (integer)
+
+      Initialize(seed):
+          block = seed
+          pos = 0
+
+      NextByte():
+          if pos >= 32:
+              block = SHA-256(block)
+              pos = 0
+          b = block[pos]
+          pos += 1
+          return b
+
+      NextU32LE():
+          b0 = NextByte()
+          b1 = NextByte()
+          b2 = NextByte()
+          b3 = NextByte()
+          return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+8.3.  Seed Derivation
+
+   The seed for fountain symbol index t is:
+
+      seed = SHA-256("SSX0" || session_id || object_id
+                     || update_id || t)
+
+   where:
+      "SSX0"     = bytes [0x53, 0x53, 0x58, 0x30]
+      session_id = uint64 LE (8 bytes)
+      object_id  = uint64 LE (8 bytes)
+      update_id  = uint64 LE (8 bytes)
+      t          = uint32 LE (4 bytes)
+
+   The session/object/update context ensures that fountain
+   symbols from different transfers cannot be confused.
+
+8.4.  Degree Distribution
+
+   The degree d is determined by the first PRNG byte b:
+
+      Byte Range     Probability   Degree
+      ----------     -----------   ------
+      0x00..0x7F     50.0%         3
+      0x80..0xBF     25.0%         5
+      0xC0..0xDF     12.5%         9
+      0xE0..0xFF     12.5%         17
+
+   This distribution is tailored for sparse decoding:
+   low degrees dominate for fast peeling, while occasional
+   high degrees ensure connectivity in the bipartite graph.
+
+8.5.  Index Selection
+
+   After determining the degree d, the PRNG generates d
+   source symbol indices:
+
+      for i in 0..d:
+          r = PRNG.NextU32LE()
+          indices[i] = r mod n
+
+   Indices are NOT deduplicated; if the same index appears
+   an even number of times, its contribution cancels via
+   XOR (effectively reducing the degree).
+
+8.6.  Encoding
+
+   A coded symbol (MIX) is the XOR of the selected source
+   symbols:
+
+      payload = s_{indices[0]} XOR s_{indices[1]} XOR ...
+                XOR s_{indices[d-1]}
+
+   where XOR is applied byte-wise over the L-byte symbols.
+
+   A systematic symbol (SYM) is simply the source symbol
+   s_k transmitted with its index k.
+
+8.7.  Decoding
+
+   The decoder maintains a sparse system of linear equations
+   over GF(2) using Gaussian elimination with back-
+   substitution:
+
+   1. Known symbol store: maps index -> L-byte symbol
+   2. Pivot table: maps pivot index -> (bitmask, rhs)
+
+   On receiving SYM(k, data):
+      Store data as known[k].
+      Substitute k into all pivot rows referencing it.
+      Propagate any newly-single pivot rows.
+
+   On receiving MIX(t, payload):
+      Compute (indices, degree) from seed(t).
+      Initialize: rhs = payload, mask = {indices}.
+      For each index in indices that is already known:
+         rhs ^= known[index]; remove from mask.
+      If mask is empty, discard (redundant).
+      Insert into pivot table via Gaussian elimination:
+         While lowest set bit p of mask has a pivot row:
+            mask ^= pivot[p].mask
+            rhs  ^= pivot[p].rhs
+         If mask is non-empty, store as new pivot at p.
+      Propagate single-bit pivot rows to known symbols.
+
+   Decoding is complete when |known| == n.
+
+   The expected overhead for complete decoding is
+   approximately 5-10% beyond n symbols, depending on
+   loss patterns and the degree distribution.
+
+
+9.  Frame Format
+
+9.1.  Frame Header
+
+   Every WISP-0 frame begins with an 80-byte header:
+
+      Offset  Size  Field         Type       Notes
+      ------  ----  -----------   ---------  -------------------
+      0       2     magic         uint16 LE  MUST be 0x5057
+      2       1     version       uint8      MUST be 0
+      3       1     frame_type    uint8      See Section 9.2
+      4       2     flags         uint16 LE  See below
+      6       4     payload_len   uint32 LE  Payload byte count
+      10      8     session_id    uint64 LE  Session identifier
+      18      8     object_id     uint64 LE  Object identifier
+      26      8     update_id     uint64 LE  Update sequence
+      34      8     frame_id      uint64 LE  Control frame seq#
+      42      4     capsule_id    uint32 LE  Profile identifier
+      46      1     chan           uint8      0=control, 1=data
+      47      1     rsv0          uint8      Reserved, MUST be 0
+      48      32    base_digest   bytes32    SHA-256 of base recipe
+
+   Magic bytes on the wire: [0x57, 0x50] (little-endian
+   encoding of 0x5057).
+
+   Flags field bits:
+
+      Bit  Name             Description
+      ---  ---------------  ---------------------------------
+      0    FLAGS_AUTH_HMAC   Frame carries HMAC-SHA256-128
+                             trailer (see Section 14.2)
+      1-15 (reserved)       MUST be 0
+
+   When FLAGS_AUTH_HMAC (0x0001) is set, payload_len includes
+   the 16-byte HMAC-SHA256-128 tag appended after the logical
+   payload data.  Receivers MUST verify the HMAC before
+   processing the frame contents.
+
+   Session-scoped frames (HELLO, SELECT) set object_id,
+   update_id, and base_digest to all zeros.
+
+   Data frames (SYM, MIX) set frame_id to 0.
+
+   Control frames use frame_id as a monotonically increasing
+   sequence number within the session, starting from 1.
+
+9.2.  Frame Types
+
+   Code   Name       Chan  Scope    Section
+   ----   ---------  ----  -------  -------
+   0x01   HELLO      0     Session  9.3.1
+   0x02   SELECT     0     Session  9.3.2
+   0x03   OFFER      0     Update   9.3.3
+   0x04   HAVE_ICT   0     Update   9.3.4
+   0x05   ICT_FAIL   0     Update   9.3.5
+   0x06   PLAN       0     Update   9.3.6
+   0x07   NEEDMORE   0     Update   9.3.7
+   0x08   COMMIT     0     Update   9.3.8
+   0x09   ACK        0     Update   9.3.9
+   0x0A   FORK       0     Update   9.3.10
+   0x20   SYM        1     Update   9.4.1
+   0x21   MIX        1     Update   9.4.2
+
+9.3.  Control Frames (chan = 0)
+
+9.3.1.  HELLO (0x01)
+
+   Sent by both endpoints during session establishment to
+   advertise capabilities.
+
+   Payload:
+      Offset  Size  Field                  Type
+      ------  ----  --------------------   ---------
+      0       4     max_control_payload    uint32 LE
+      4       4     max_data_payload       uint32 LE
+      8       1     max_m_log2             uint8
+      9       4     max_symbols            uint32 LE
+      13      1     profiles_count         uint8
+      14      8*N   profiles[N]            array of:
+                      capsule_id: uint32 LE
+                      capsule_ver: uint16 LE
+                      rsv: uint16 LE (0)
+
+   Minimum payload length: 14 bytes.
+
+   Negotiation: both sides take the minimum of each
+   capability parameter.
+
+9.3.1.1.  HelloAuth Extension
+
+   When a pre-shared key (PSK) is configured, the HELLO
+   payload is extended with a HelloAuth block immediately
+   following the profiles array:
+
+      Offset  Size  Field    Type
+      ------  ----  -------  -------------------------
+      0       8     key_id   bytes (SHA-256(PSK)[0:8])
+      8       32    eph_pub  bytes (X25519 ephemeral
+                              public key)
+
+   Total HelloAuth extension size: 40 bytes.
+
+   key_id identifies which PSK the initiator is using,
+   allowing the responder to perform keyring-based lookup
+   without the initiator revealing the PSK itself.  The
+   eph_pub field carries the initiator's ephemeral X25519
+   public key for the Diffie-Hellman key exchange described
+   in Section 14.1.
+
+   If a HelloAuth block is present, the HELLO payload
+   length is 14 + 8*profiles_count + 40 bytes.
+
+   Implementations that do not support authentication
+   MUST ignore any trailing bytes beyond the profiles
+   array.  Implementations that require authentication
+   MUST reject HELLO payloads that lack the HelloAuth
+   extension (see Section 14.6, Anti-Downgrade Protection).
+
+9.3.2.  SELECT (0x02)
+
+   Sent by the sender after HELLO exchange to choose the
+   active capsule profile.
+
+   Payload:
+      Offset  Size  Field         Type
+      ------  ----  -----------   ---------
+      0       4     capsule_id    uint32 LE
+      4       2     capsule_ver   uint16 LE
+      6       2     rsv           uint16 LE (0)
+
+   Fixed payload length: 8 bytes.
+
+9.3.3.  OFFER (0x03)
+
+   Sent by the sender to propose a target Object version.
+
+   Payload:
+      Offset  Size     Field     Type
+      ------  -------  --------  -------------------------
+      0       32       h_target  bytes32 (recipe digest)
+      32      ULEB128  ops_len   length of ops data
+      32+v    ops_len  ops       RecipeOps/0 encoded bytes
+
+   The receiver applies the RecipeOps to its base recipe
+   and verifies that the resulting recipe's digest equals
+   h_target.  On success, sends ACK.
+
+9.3.4.  HAVE_ICT (0x04)
+
+   Sent by the receiver with the difference ICT (target minus
+   have).  The sender peels this directly without subtraction.
+
+   Payload: raw ICT wire format (Section 7.7).
+
+9.3.5.  ICT_FAIL (0x05)
+
+   Sent by the sender if peeling the difference ICT fails.
+
+   Payload:
+      Offset  Size  Field    Type
+      ------  ----  -------  ---------
+      0       1     reason   uint8
+      1       1     rsv0     uint8 (0)
+      2       2     rsv1     uint16 LE (0)
+
+   Fixed payload length: 4 bytes.
+
+   Reason codes:
+      0x01  Table undersized (peel left non-zero cells)
+      0x02  Table size mismatch
+
+9.3.6.  PLAN (0x06)
+
+   Sent by the sender after ICT reconciliation to declare
+   the transfer parameters.
+
+   Payload:
+      Offset  Size  Field           Type
+      ------  ----  --------------  ---------
+      0       2     l               uint16 LE (symbol length)
+      2       1     ssx_profile     uint8 (MUST be 0)
+      3       1     rsv0            uint8 (0)
+      4       4     n               uint32 LE (source symbol count)
+      8       32    missing_digest  bytes32
+
+   Fixed payload length: 40 bytes.
+
+   l MUST be 1024 for CSR/0.  ssx_profile MUST be 0.
+
+   missing_digest = SHA-256(RecipeWire(missing_recipe)),
+   where missing_recipe contains one entry per missing
+   ChunkId, ordered by first appearance in the target
+   recipe (duplicate ChunkIds are included only once).
+   Encoded in standard RecipeWire format (Section 7.5).
+
+   The receiver MUST verify missing_digest against its
+   locally computed value.  On mismatch, the receiver
+   sends FORK with reason 0x02.
+
+9.3.7.  NEEDMORE (0x07)
+
+   Sent by the receiver when the decoder is not yet
+   complete after the initial symbol burst.
+
+   Payload:
+      Offset  Size  Field    Type
+      ------  ----  -------  ---------
+      0       4     next_t   uint32 LE
+
+   Fixed payload length: 4 bytes.
+
+   next_t indicates the fountain index at which the
+   sender should resume MIX transmission.
+
+9.3.8.  COMMIT (0x08)
+
+   Sent by the receiver after successful reconstruction
+   and verification of the target Object.
+
+   Payload:
+      Offset  Size  Field     Type
+      ------  ----  --------  ---------
+      0       32    h_target  bytes32
+
+   Fixed payload length: 32 bytes.
+
+   The sender verifies that h_target matches the
+   originally offered digest.
+
+9.3.9.  ACK (0x09)
+
+   Sent in response to OFFER, PLAN, or COMMIT to
+   acknowledge receipt.
+
+   Payload:
+      Offset  Size  Field         Type
+      ------  ----  ------------  ---------
+      0       8     ack_frame_id  uint64 LE
+
+   Fixed payload length: 8 bytes.
+
+   ack_frame_id is the frame_id of the acknowledged frame.
+
+9.3.10.  FORK (0x0A)
+
+   Sent when an integrity check fails, signaling
+   protocol divergence.
+
+   Payload:
+      Offset  Size  Field     Type
+      ------  ----  --------  ---------
+      0       1     reason    uint8
+      1       1     rsv0      uint8 (0)
+      2       2     rsv1      uint16 LE (0)
+      4       32    expected  bytes32
+      36      32    observed  bytes32
+
+   Fixed payload length: 68 bytes.
+
+   Reason codes:
+      0x01  Recipe digest mismatch
+      0x02  Missing list digest mismatch
+      0x03  Chunk hash mismatch
+      0x04  Base digest mismatch
+
+9.4.  Data Frames (chan = 1)
+
+9.4.1.  SYM (0x20)
+
+   A systematic source symbol.
+
+   Payload:
+      Offset  Size  Field  Type
+      ------  ----  -----  ---------
+      0       4     k      uint32 LE (source symbol index)
+      4       L     data   bytes (L = 1024 for CSR/0)
+
+   Payload length: 4 + L = 1028 bytes.
+
+9.4.2.  MIX (0x21)
+
+   A coded repair symbol.
+
+   Payload:
+      Offset  Size  Field    Type
+      ------  ----  -------  ---------
+      0       4     t        uint32 LE (fountain index)
+      4       L     payload  bytes (L = 1024 for CSR/0)
+
+   Payload length: 4 + L = 1028 bytes.
+
+
+10.  Transport Binding
+
+10.1.  C0 Channel (TCP)
+
+   The C0 channel carries control frames over a TCP
+   connection.  Frames are sent as:
+
+      [FrameHeader: 80 bytes][Payload: payload_len bytes]
+
+   The TCP stream provides reliable, ordered delivery.
+   Implementations MUST NOT reorder control frames.
+
+   The connection is established by the sender connecting
+   to the receiver's listening TCP port.
+
+10.2.  D0 Channel (UDP)
+
+   The D0 channel carries data frames over UDP datagrams.
+   Each datagram contains exactly one frame:
+
+      [FrameHeader: 80 bytes][Payload: 1028 bytes]
+
+   Total datagram size: D0_FRAME_SIZE = 1108 bytes.
+
+   The payload is always exactly 1028 bytes (4-byte index
+   + 1024-byte symbol data).  Shorter payloads are zero-
+   padded; longer payloads are truncated.
+
+   The D0 port is conventionally TCP_port + 1.
+
+   D0 provides no reliability guarantees.  The fountain
+   coding (SSX/0) provides erasure recovery without
+   retransmission.
+
+
+11.  Protocol State Machine
+
+11.1.  Session Establishment
+
+   The handshake is a three-message exchange on C0:
+
+      Sender                          Receiver
+        |                               |
+        |------- HELLO -------->        |
+        |                               |
+        |<------- HELLO --------|       |
+        |                               |
+        |------- SELECT ------->        |
+        |                               |
+
+   Both HELLO frames are session-scoped (object_id = 0,
+   update_id = 0, base_digest = zeros).
+
+   After SELECT, both endpoints have agreed on:
+   - session_id (from sender's HELLO)
+   - capsule_id, capsule_ver (from SELECT)
+   - max_m_log2 = min(sender, receiver)
+   - max_symbols = min(sender, receiver)
+   - max_control_payload = min(sender, receiver)
+   - max_data_payload = min(sender, receiver)
+
+11.2.  Update Cycle
+
+   Each update cycle synchronizes one Object version:
+
+      Sender                          Receiver
+        |                               |
+        |------- OFFER -------->        |
+        |<-------- ACK ---------|       |
+        |                               |
+        |<------ HAVE_ICT ------|       |
+        |                               |
+        |------- PLAN --------->        |
+        |<-------- ACK ---------|       |
+        |                               |
+        |== SYM (D0, bulk) ===>         |
+        |== MIX (D0, bulk) ===>         |
+        |                               |
+        |      [optional: NEEDMORE]     |
+        |<------ NEEDMORE ------|       |
+        |== MIX (D0, more) ===>        |
+        |                               |
+        |<------- COMMIT -------|       |
+        |-------- ACK --------->        |
+        |                               |
+
+   update_id increments by 1 for each update cycle within
+   a session.
+
+11.3.  Sender State Machine
+
+   State: IDLE
+
+   IDLE:
+      Chunk the target Object with CSR/0.
+      Build the target Recipe.
+      Compute H_target = SHA-256(RecipeWire(target)).
+      Compute RecipeOps = diff(base_recipe, target_recipe).
+      Send OFFER(H_target, RecipeOps) on C0.
+      Transition to WAIT_HAVE_ICT.
+
+   WAIT_HAVE_ICT:
+      Receive ACK for OFFER.
+      Receive HAVE_ICT from receiver on C0.
+      Decode and peel the received difference ICT directly.
+      If peel fails, send ICT_FAIL with reason 0x01.
+      Compute missing_list: walk target recipe entries in order,
+        collecting missing ChunkIds by first appearance (skip
+        duplicates).  This deduped list defines missing_recipe.
+      Symbolize missing chunks into n source symbols.
+      Compute missing_digest = SHA-256(RecipeWire(missing_recipe)).
+      Send PLAN(l=1024, ssx_profile=0, n, missing_digest).
+      Transition to SENDING.
+
+   SENDING:
+      Receive ACK for PLAN.
+      For k in 0..n:
+         Send SYM(k, source_symbols[k]) on D0.
+      For t in 0..burst_count:
+         Compute (indices, degree) from seed(t).
+         Compute payload = encode_mix(source_symbols, indices).
+         Send MIX(t, payload) on D0.
+      Transition to WAIT_COMMIT.
+
+   WAIT_COMMIT:
+      Receive COMMIT(H_target) or NEEDMORE(next_t) on C0.
+      If NEEDMORE:
+         Resume MIX from t = next_t.
+         Remain in WAIT_COMMIT.
+      If COMMIT:
+         Verify H_target matches.
+         Send ACK.
+         Update base_recipe = target_recipe.
+         Transition to IDLE.
+      If FORK:
+         Handle divergence (log, abort, or retry).
+
+11.4.  Receiver State Machine
+
+   State: IDLE
+
+   IDLE:
+      Receive OFFER(H_target, RecipeOps) on C0.
+      Apply RecipeOps to base_recipe.
+      Verify SHA-256(RecipeWire(result)) == H_target.
+      If mismatch, send FORK.
+      Send ACK for OFFER.
+      Compute target_keys (ChunkIds in target recipe).
+      Compute have_keys (ChunkIds in base recipe AND target).
+      Build target_ict with target_keys (using matching m_log2).
+      Build have_ict with have_keys (using matching m_log2).
+      Compute diff_ict = target_ict - have_ict.
+      Send HAVE_ICT(diff_ict) on C0.
+      Transition to WAIT_PLAN.
+
+   WAIT_PLAN:
+      Receive PLAN(l, ssx_profile, n, missing_digest) on C0.
+      Verify missing_digest against locally computed value.
+      If mismatch, send FORK.
+      Send ACK for PLAN.
+      Initialize SsxDecoder(n).
+      Transition to RECEIVING.
+      If ICT_FAIL received instead of PLAN:
+        The sender's ICT peel failed (table undersized).
+        Implementations MAY retry with a larger d_est and
+        resend HAVE_ICT.  Otherwise, abort the update cycle.
+
+   RECEIVING:
+      Concurrently receive on D0 and C0:
+      - SYM(k, data):  decoder.add_sym(k, data)
+      - MIX(t, payload):  decoder.add_mix(t, payload, ...)
+      - ACK on C0: ignore (sender's acks)
+      When decoder.is_complete():
+         Take recovered symbols.
+         Reconstruct chunks from symbols.
+         Verify h128(chunk_data) == chunk_id for each chunk.
+         If any mismatch, send FORK.
+         Reassemble Object in recipe order.
+         Transition to COMMITTING.
+      If timeout without completion:
+         Send NEEDMORE(next_t) on C0.
+         Remain in RECEIVING.
+
+   COMMITTING:
+      Send COMMIT(H_target) on C0.
+      Receive ACK.
+      Update base_recipe = target_recipe.
+      Transition to IDLE.
+
+
+12.  VARINT Encoding
+
+   WISP-0 uses ULEB128 (Unsigned Little-Endian Base 128)
+   for variable-length integer encoding.
+
+   Encoding:
+      While value > 0x7F:
+         Emit (value & 0x7F) | 0x80
+         value >>= 7
+      Emit value & 0x7F
+
+   Decoding:
+      shift = 0
+      result = 0
+      Loop:
+         Read byte b
+         result |= (b & 0x7F) << shift
+         If (b & 0x80) == 0: return result
+         shift += 7
+         If shift > 63: ERROR (overflow)
+
+   Maximum encoded length: 10 bytes (for 64-bit values).
+
+
+13.  Operational Semantics
+
+   This section describes operational behaviors that
+   implementations SHOULD support for robust performance
+   in real-world network conditions.
+
+13.1.  Adaptive Timeouts
+
+   Implementations SHOULD use EWMA (Exponentially Weighted
+   Moving Average) RTT estimation, following a simplified
+   form of RFC 6298 [RFC6298]:
+
+      On each RTT sample r:
+         avg = (1 - alpha) * avg + alpha * r
+         var = (1 - beta)  * var + beta  * |r - avg|
+
+      where alpha = 0.125 and beta = 0.25.
+
+   Timeout values are derived as:
+
+      control_timeout = max(avg + 4 * var, 1.0s)
+                        capped at 30.0s
+
+      data_timeout    = max(3 * control_timeout, 10.0s)
+
+   Initial estimates (before any RTT samples):
+      avg = 2.0 seconds
+      var = 0.5 seconds
+
+   The control_timeout applies to C0 request/response
+   exchanges (e.g., waiting for ACK after OFFER or PLAN).
+   The data_timeout applies to D0 bulk transfer phases
+   (e.g., waiting for decoder completion before sending
+   NEEDMORE).
+
+13.2.  D0 Flow Control
+
+   Implementations SHOULD pace D0 (SYM/MIX) transmissions
+   with a minimum inter-packet interval to prevent burst
+   loss on congested links.  A default minimum interval of
+   100 microseconds between consecutive D0 frames is
+   RECOMMENDED.
+
+   The pacing interval MAY be adjusted based on observed
+   loss rates or receiver feedback.  Implementations MUST
+   NOT send D0 frames faster than the negotiated link
+   capacity allows.
+
+13.3.  NEEDMORE Semantics
+
+   When the receiver's decoder stalls (no new symbols
+   resolved within the data_timeout period), it SHOULD
+   send a NEEDMORE frame with next_t indicating the next
+   desired MIX index.
+
+   Implementations SHOULD limit NEEDMORE retries to a
+   maximum of 3 per update cycle.  The retry counter
+   SHOULD be reset to zero when forward progress resumes
+   (i.e., when the decoder successfully resolves at least
+   one new source symbol after a NEEDMORE exchange).
+
+   If the maximum retry count is exceeded without decoder
+   completion, the receiver SHOULD terminate the update
+   cycle with a FORK frame indicating a transfer failure.
+
+
+14.  Security Considerations
+
+   WISP-0 provides OPTIONAL authentication and integrity
+   protection via an X25519-PSK key exchange and per-frame
+   HMAC authentication.  When a pre-shared key (PSK) is
+   configured on both peers, the protocol establishes a
+   per-session key with forward secrecy.  When no PSK is
+   configured, the protocol operates without authentication;
+   in that case, implementations SHOULD layer WISP-0 over
+   TLS (for C0) and DTLS (for D0) when operating over
+   untrusted networks.
+
+14.1.  X25519-PSK-HKDF Authentication
+
+   When both peers share a pre-shared key (PSK), WISP-0
+   performs X25519 ephemeral Diffie-Hellman key exchange
+   during the HELLO phase:
+
+   1. Each peer generates an ephemeral X25519 key pair
+      (eph_sk, eph_pub) per session.
+
+   2. Each peer includes a HelloAuth extension in its
+      HELLO frame (Section 9.3.1.1), carrying:
+      - key_id: SHA-256(PSK)[0:8]  (8 bytes)
+      - eph_pub: the ephemeral public key  (32 bytes)
+
+   3. Upon receiving the remote peer's HELLO, each peer
+      computes:
+
+         shared_secret = X25519(eph_sk_local, eph_pub_remote)
+
+   4. The session key is derived via HKDF-SHA256 [RFC5869]:
+
+         session_key = HKDF-SHA256(
+             salt = session_id  (8 bytes, little-endian),
+             ikm  = shared_secret || PSK,
+             info = "wisp0-session"
+         )
+
+   The ephemeral key exchange provides per-session forward
+   secrecy: compromise of the PSK alone does not reveal
+   past session keys, provided the ephemeral secrets have
+   been securely erased (Section 14.8).
+
+14.2.  HMAC-SHA256-128 Frame Authentication
+
+   When a session_key has been established (Section 14.1),
+   all frames MUST be authenticated with HMAC-SHA256-128.
+   The authentication tag is computed as:
+
+      tag = HMAC-SHA256(session_key, header || payload)[0:16]
+
+   The 16-byte tag is appended to the frame payload.  The
+   flags field bit 0 (FLAGS_AUTH_HMAC = 0x0001) MUST be set
+   on authenticated frames.  The payload_len field includes
+   the 16 bytes of the HMAC tag.
+
+   Receivers MUST verify the HMAC tag before processing the
+   frame payload.  Frames with invalid tags MUST be silently
+   discarded.
+
+   The HMAC covers the complete frame header (80 bytes) and
+   the logical payload (payload_len - 16 bytes), binding the
+   authentication to the frame metadata (session_id,
+   frame_type, frame_id, etc.) and preventing cross-frame
+   replay or substitution.
+
+14.3.  Replay Protection
+
+   WISP-0 employs two mechanisms for replay protection:
+
+   D0 Frames (SYM, MIX):
+      A 128-bit sliding window keyed by the frame's data
+      sequence number (derived from frame_id / data_seq).
+      Frames with sequence numbers that fall within the
+      window and have already been seen, or that fall behind
+      the window's trailing edge, are silently dropped.
+
+   C0 Frames (control):
+      Control frames use frame_id as a monotonically
+      increasing sequence number.  Receivers MUST reject
+      any control frame whose frame_id is less than or
+      equal to the highest previously accepted frame_id
+      for that session.  Duplicate or regressed frame_ids
+      are silently dropped.
+
+14.4.  Session Limits
+
+   To bound resource consumption and limit the window of
+   exposure from a compromised session key, the following
+   limits apply:
+
+      MAX_SESSION_FRAMES   = 2^32
+      MAX_SESSION_DURATION = 3600 seconds (1 hour)
+
+   Implementations MUST terminate the session when either
+   limit is reached.  A new session (with fresh ephemeral
+   keys) MUST be established to continue synchronization.
+
+14.5.  Per-IP Auth Rate Limiting
+
+   Implementations SHOULD track HMAC verification failures
+   per source IP address.  After 5 verification failures
+   within a 60-second window, the source IP SHOULD be
+   blocked for 300 seconds (5 minutes).  This limits the
+   effectiveness of brute-force tag-guessing and denial-of-
+   service attacks against the authentication mechanism.
+
+14.6.  Anti-Downgrade Protection
+
+   If the responder has a PSK configured for the session,
+   it MUST reject initiators that do not present a
+   HelloAuth extension with a matching key_id.  This
+   prevents an active attacker from stripping the
+   authentication extension from HELLO frames to force
+   an unauthenticated session.
+
+   Implementations that require authentication MUST NOT
+   fall back to unauthenticated operation when a PSK is
+   configured.
+
+14.7.  Key Identity
+
+   The key_id field is defined as:
+
+      key_id = SHA-256(PSK)[0:8]
+
+   This 8-byte identifier allows keyring-based identity
+   lookup without exposing the PSK value on the wire.
+   The 64-bit key_id provides sufficient uniqueness for
+   practical keyring sizes while remaining compact enough
+   for inclusion in every HELLO frame.
+
+14.8.  Zeroize
+
+   Implementations MUST securely wipe (zeroize) the
+   following values from memory when they are no longer
+   needed:
+
+   - Ephemeral X25519 private keys (eph_sk), immediately
+     after computing the shared_secret.
+   - The shared_secret, immediately after deriving the
+     session_key.
+   - The session_key, upon session termination.
+
+   Secure wiping means overwriting the memory with zeros
+   (or random bytes) and ensuring that the compiler does
+   not optimize away the clearing operation.
+
+14.9.  Data Integrity Considerations
+
+   The following considerations apply to the cryptographic
+   primitives and data structures used by WISP-0:
+
+   1. Hash Collision: ChunkIds use 128-bit truncated
+      SHA-256.  An attacker who can find SHA-256 collisions
+      in the first 128 bits could substitute chunk content.
+      The birthday bound provides ~2^{64} collision
+      resistance, adequate for content addressing but not
+      for adversarial settings.  When authentication is
+      enabled (Section 14.2), per-frame HMAC provides
+      additional protection against content substitution.
+
+   2. Recipe Integrity: H_recipe (full SHA-256) protects
+      against recipe tampering, providing 128-bit collision
+      resistance.
+
+   3. ICT Manipulation: A malicious peer could send a
+      crafted ICT sketch that causes the sender to compute
+      an incorrect missing set.  The missing_digest in PLAN
+      provides a cross-check.  When frame authentication
+      is enabled, ICT frames are HMAC-protected against
+      tampering in transit.
+
+   4. Fountain Symbol Injection: Without frame-level or
+      transport-layer authentication, an attacker on the
+      network path could inject or modify D0 datagrams.
+      The per-chunk hash verification (Section 11.4)
+      detects corrupted chunks after decoding.  Enabling
+      HMAC authentication (Section 14.2) prevents symbol
+      injection.
+
+   5. Denial of Service: The ICT table size is bounded by
+      max_m_log2 (negotiated in HELLO), limiting memory
+      allocation.  The max_symbols parameter bounds the
+      decoder's state.  Session limits (Section 14.4)
+      bound total resource consumption per session.
+
+   6. Side Channels: The ICT sketch reveals information
+      about which chunks the receiver already holds.  In
+      sensitive applications, this may leak information
+      about the receiver's state.
+
+
+15.  IANA Considerations
+
+   This document makes no requests of IANA.
+
+   A future version may request:
+   - A well-known TCP port number for WISP
+   - A registry for capsule_id / profile identifiers
+   - A registry for frame type codes
+
+
+16.  References
+
+16.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to
+              Indicate Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase
+              in RFC 2119 Key Words", BCP 14, RFC 8174,
+              DOI 10.17487/RFC8174, May 2017.
+
+   [FIPS180-4] National Institute of Standards and Technology,
+               "Secure Hash Standard (SHS)", FIPS PUB 180-4,
+               August 2015.
+
+   [RFC5869]  Krawczyk, H. and P. Eronen, "HMAC-based
+              Extract-and-Expand Key Derivation Function
+              (HKDF)", RFC 5869, DOI 10.17487/RFC5869,
+              May 2010.
+
+   [RFC7748]  Langley, A., Hamburg, M., and S. Turner,
+              "Elliptic Curves for Security", RFC 7748,
+              DOI 10.17487/RFC7748, January 2016.
+
+   [RFC6298]  Paxson, V., Allman, M., Chu, J., and M.
+              Sargent, "Computing TCP's Retransmission
+              Timer", RFC 6298, DOI 10.17487/RFC6298,
+              June 2011.
+
+16.2.  Informative References
+
+   [RSYNC]    Tridgell, A. and P. Mackerras, "The rsync
+              algorithm", Technical Report TR-CS-96-05,
+              Australian National University, 1996.
+
+   [IPFS]     Benet, J., "IPFS - Content Addressed, Versioned,
+              P2P File System", arXiv:1407.3561, July 2014.
+
+   [IBLT]     Goodrich, M. T. and M. Mitzenmacher, "Invertible
+              Bloom Lookup Tables", Proceedings of the 49th
+              Annual Allerton Conference, 2011.
+
+   [LT-CODES] Luby, M., "LT Codes", Proceedings of the 43rd
+               Annual IEEE Symposium on Foundations of Computer
+               Science (FOCS), 2002.
+
+   [RAPTOR]   Shokrollahi, A., "Raptor Codes", IEEE
+              Transactions on Information Theory, vol. 52,
+              no. 6, pp. 2551-2567, June 2006.
+
+   [CDC]      Eshghi, K. and H. K. Tang, "A Framework for
+              Analyzing and Improving Content-Based Chunking
+              Algorithms", HPL-2005-30R1, Hewlett-Packard
+              Labs, 2005.
+
+   [RABIN]    Rabin, M. O., "Fingerprinting by Random
+              Polynomials", Center for Research in Computing
+              Technology, Harvard University, TR-15-81, 1981.
+
+
+Appendix A.  Conformance Vectors
+
+   Reference conformance vectors are provided as JSON files
+   covering each protocol component:
+
+   cdc.json:     CDC chunking test vectors.  Each entry
+                 contains input data (hex-encoded), expected
+                 chunk count, and expected ChunkIds.
+
+   recipe.json:  Recipe serialization vectors.  Each entry
+                 contains a recipe, its wire encoding (hex),
+                 and its digest.
+
+   ict.json:     ICT operation vectors.  Entries cover
+                 insert-peel and subtract-peel scenarios
+                 with expected missing sets.
+
+   ssx.json:     SSX fountain coding vectors.  Entries
+                 contain seed parameters, expected indices,
+                 degrees, and encoded payloads for specific
+                 fountain indices.
+
+   Implementations MUST produce identical outputs for all
+   conformance vectors to claim CSR/0 compliance.
+
+
+Appendix B.  Design Rationale
+
+B.1.  Why CDC?
+
+   Fixed-size chunking causes a single byte insertion to
+   shift all subsequent chunk boundaries, producing O(n)
+   changed chunks for a 1-byte edit.  CDC provides O(1)
+   locality: only chunks overlapping the edit change.
+   The CSR/0 parameters (8-64-256 KiB min-avg-max) balance
+   deduplication granularity against metadata overhead.
+
+B.2.  Why ICT over Bloom Filters?
+
+   Standard Bloom filters support membership queries but
+   cannot enumerate the difference set directly.  The ICT
+   (a variant of the Invertible Bloom Lookup Table) allows
+   exact recovery of symmetric differences in a single
+   round trip, avoiding the logarithmic round-trip overhead
+   of interactive set reconciliation protocols.
+
+B.3.  Why Fountain Codes?
+
+   Traditional ARQ (Automatic Repeat reQuest) requires
+   per-packet acknowledgment and retransmission, adding
+   latency proportional to RTT * loss_rate.  Fountain
+   codes provide rateless erasure protection: the sender
+   generates an unlimited stream of coded symbols, and
+   the receiver can recover from any loss pattern with
+   approximately n * (1 + epsilon) received symbols.
+   This is particularly effective over high-latency or
+   lossy links.
+
+B.4.  Why Dual Channels?
+
+   Separating control (TCP) from data (UDP) avoids TCP's
+   head-of-line blocking on the bulk data path while
+   maintaining reliable delivery for protocol signaling.
+   The 1108-byte D0 frame fits within typical MTU limits
+   (1280 IPv6, 1500 Ethernet) without fragmentation.
+
+B.5.  Why 1024-byte Symbols?
+
+   The symbol size L = 1024 balances encoding efficiency
+   against datagram overhead.  With a 80-byte header and
+   4-byte index, each D0 datagram carries exactly one
+   symbol, and the total frame size (1108 bytes) comfortably
+   fits within a 1280-byte minimum MTU after IP/UDP headers.
+
+
+Authors' Addresses
+
+   WISP Protocol Working Group
+
+   Email: wisp-protocol@example.org
