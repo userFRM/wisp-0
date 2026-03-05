@@ -20,6 +20,10 @@ const NEEDMORE: u8 = 0x07;
 const COMMIT: u8 = 0x08;
 const ACK: u8 = 0x09;
 const FORK: u8 = 0x0A;
+const MANIFEST: u8 = 0x0C;
+const MANIFEST_ACK: u8 = 0x0D;
+const SYNC_REQUEST: u8 = 0x0E;
+const SYNC_RESPONSE: u8 = 0x0F;
 
 // Data (chan = 1)
 const SYM: u8 = 0x20;
@@ -184,6 +188,24 @@ pub enum Frame {
         t: u32,
         payload: Vec<u8>,
     },
+    /// Directory manifest: wire-encoded list of (path, size, recipe_digest).
+    Manifest {
+        data: Vec<u8>,
+    },
+    /// Manifest acknowledgement: wire-encoded list of paths the receiver needs.
+    ManifestAck {
+        files_needed: Vec<u8>,
+    },
+    /// Bidirectional sync request: initiator's D0 port + wire-encoded Manifest.
+    SyncRequest {
+        d0_port: u16,
+        manifest_data: Vec<u8>,
+    },
+    /// Bidirectional sync response: responder's D0 port + wire-encoded Manifest.
+    SyncResponse {
+        d0_port: u16,
+        manifest_data: Vec<u8>,
+    },
 }
 
 impl Frame {
@@ -202,6 +224,10 @@ impl Frame {
             Frame::Fork { .. } => FORK,
             Frame::Sym { .. } => SYM,
             Frame::Mix { .. } => MIX,
+            Frame::Manifest { .. } => MANIFEST,
+            Frame::ManifestAck { .. } => MANIFEST_ACK,
+            Frame::SyncRequest { .. } => SYNC_REQUEST,
+            Frame::SyncResponse { .. } => SYNC_RESPONSE,
         }
     }
 
@@ -328,6 +354,20 @@ impl Frame {
                 out.extend_from_slice(payload);
                 out
             }
+            Frame::Manifest { data } => data.clone(),
+            Frame::ManifestAck { files_needed } => files_needed.clone(),
+            Frame::SyncRequest { d0_port, manifest_data } => {
+                let mut out = Vec::with_capacity(2 + manifest_data.len());
+                out.extend_from_slice(&d0_port.to_le_bytes());
+                out.extend_from_slice(manifest_data);
+                out
+            }
+            Frame::SyncResponse { d0_port, manifest_data } => {
+                let mut out = Vec::with_capacity(2 + manifest_data.len());
+                out.extend_from_slice(&d0_port.to_le_bytes());
+                out.extend_from_slice(manifest_data);
+                out
+            }
         }
     }
 
@@ -425,7 +465,7 @@ impl Frame {
                 h_target.copy_from_slice(&payload[0..32]);
                 let (ops_len, off) = varint::decode(payload, 32)?;
                 let ops_len = ops_len as usize;
-                if payload.len() < off + ops_len {
+                if off.checked_add(ops_len).is_none_or(|end| payload.len() < end) {
                     return Err(WispError::BufferUnderflow);
                 }
                 let ops = payload[off..off + ops_len].to_vec();
@@ -516,6 +556,32 @@ impl Frame {
                 let t = u32::from_le_bytes(payload[0..4].try_into().unwrap());
                 let p = payload[4..].to_vec();
                 Ok(Frame::Mix { t, payload: p })
+            }
+            MANIFEST => Ok(Frame::Manifest {
+                data: payload.to_vec(),
+            }),
+            MANIFEST_ACK => Ok(Frame::ManifestAck {
+                files_needed: payload.to_vec(),
+            }),
+            SYNC_REQUEST => {
+                if payload.len() < 2 {
+                    return Err(WispError::BufferUnderflow);
+                }
+                let d0_port = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+                Ok(Frame::SyncRequest {
+                    d0_port,
+                    manifest_data: payload[2..].to_vec(),
+                })
+            }
+            SYNC_RESPONSE => {
+                if payload.len() < 2 {
+                    return Err(WispError::BufferUnderflow);
+                }
+                let d0_port = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+                Ok(Frame::SyncResponse {
+                    d0_port,
+                    manifest_data: payload[2..].to_vec(),
+                })
             }
             _ => Err(WispError::UnknownFrameType(frame_type)),
         }
@@ -876,6 +942,20 @@ mod tests {
                 expected: Digest32::default(),
                 observed: Digest32::default(),
             },
+            Frame::Manifest {
+                data: vec![],
+            },
+            Frame::ManifestAck {
+                files_needed: vec![],
+            },
+            Frame::SyncRequest {
+                d0_port: 0,
+                manifest_data: vec![],
+            },
+            Frame::SyncResponse {
+                d0_port: 0,
+                manifest_data: vec![],
+            },
         ];
         for f in &control_frames {
             assert_eq!(f.channel(), 0, "expected chan=0 for {:?}", f);
@@ -1014,5 +1094,35 @@ mod tests {
     fn truncated_fork_payload() {
         let err = Frame::decode_payload(FORK, &[0; 30]).unwrap_err();
         assert!(matches!(err, WispError::BufferUnderflow));
+    }
+
+    #[test]
+    fn manifest_round_trip() {
+        payload_round_trip(Frame::Manifest {
+            data: vec![1, 2, 3, 4, 5],
+        });
+    }
+
+    #[test]
+    fn manifest_ack_round_trip() {
+        payload_round_trip(Frame::ManifestAck {
+            files_needed: vec![10, 20, 30],
+        });
+    }
+
+    #[test]
+    fn sync_request_round_trip() {
+        payload_round_trip(Frame::SyncRequest {
+            d0_port: 9001,
+            manifest_data: vec![1, 2, 3],
+        });
+    }
+
+    #[test]
+    fn sync_response_round_trip() {
+        payload_round_trip(Frame::SyncResponse {
+            d0_port: 9002,
+            manifest_data: vec![4, 5, 6],
+        });
     }
 }

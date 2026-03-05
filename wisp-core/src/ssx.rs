@@ -122,20 +122,36 @@ pub fn encode_mix(source_symbols: &[&[u8; SYMBOL_SIZE]], indices: &[usize]) -> [
 pub fn symbolize(chunks: &[(ChunkId, Vec<u8>)]) -> Vec<[u8; SYMBOL_SIZE]> {
     let mut symbols = Vec::new();
     for (_id, data) in chunks {
-        let mut offset = 0;
-        while offset < data.len() {
-            let mut sym = [0u8; SYMBOL_SIZE];
-            let end = (offset + SYMBOL_SIZE).min(data.len());
-            sym[..end - offset].copy_from_slice(&data[offset..end]);
-            symbols.push(sym);
-            offset += SYMBOL_SIZE;
-        }
-        // If data is empty, produce one zero symbol.
-        if data.is_empty() {
-            symbols.push([0u8; SYMBOL_SIZE]);
-        }
+        symbolize_bytes(data, &mut symbols);
     }
     symbols
+}
+
+/// Like `symbolize` but accepts borrowed chunk data (`&[u8]` instead of `Vec<u8>`).
+///
+/// Use with `chunk_fast_ref` to avoid cloning chunk data when the source is
+/// memory-mapped.
+pub fn symbolize_ref(chunks: &[(ChunkId, &[u8])]) -> Vec<[u8; SYMBOL_SIZE]> {
+    let mut symbols = Vec::new();
+    for (_id, data) in chunks {
+        symbolize_bytes(data, &mut symbols);
+    }
+    symbols
+}
+
+/// Shared implementation: split a byte slice into SYMBOL_SIZE-padded symbols.
+fn symbolize_bytes(data: &[u8], symbols: &mut Vec<[u8; SYMBOL_SIZE]>) {
+    let mut offset = 0;
+    while offset < data.len() {
+        let mut sym = [0u8; SYMBOL_SIZE];
+        let end = (offset + SYMBOL_SIZE).min(data.len());
+        sym[..end - offset].copy_from_slice(&data[offset..end]);
+        symbols.push(sym);
+        offset += SYMBOL_SIZE;
+    }
+    if data.is_empty() {
+        symbols.push([0u8; SYMBOL_SIZE]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,5 +242,15 @@ mod tests {
         let syms = symbolize(&[(id, vec![])]);
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0], [0u8; SYMBOL_SIZE]);
+    }
+
+    #[test]
+    fn symbolize_ref_matches_symbolize() {
+        let id = ChunkId([0; 16]);
+        let data1 = vec![0xAA; 2048];
+        let data2 = vec![0xBB; 500];
+        let owned = vec![(id, data1.clone()), (id, data2.clone())];
+        let borrowed: Vec<(ChunkId, &[u8])> = vec![(id, &data1), (id, &data2)];
+        assert_eq!(symbolize(&owned), symbolize_ref(&borrowed));
     }
 }

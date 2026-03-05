@@ -71,7 +71,12 @@ impl Recipe {
         let (num_chunks, new_off) = varint::decode(data, off)?;
         off = new_off;
 
-        let mut entries = Vec::with_capacity(num_chunks as usize);
+        // Each entry is at least 17 bytes (16-byte ChunkId + 1-byte varint).
+        // Cap capacity to prevent OOM from malicious varint values.
+        let remaining = data.len().saturating_sub(off);
+        let max_entries = remaining / 17;
+        let cap = (num_chunks as usize).min(max_entries);
+        let mut entries = Vec::with_capacity(cap);
         for _ in 0..num_chunks {
             if off + 16 > data.len() {
                 return Err(WispError::BufferUnderflow);

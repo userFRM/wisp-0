@@ -14,5 +14,6 @@ pub mod ssx;
 pub mod ssx_decoder;
 pub mod replay;
 pub mod frame;
+pub mod manifest;
 
 pub use hashbrown;

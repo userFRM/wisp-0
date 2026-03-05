@@ -91,6 +91,9 @@ pub enum WispError {
     #[cfg_attr(feature = "std", error("key_id mismatch: no matching PSK in keyring"))]
     KeyIdMismatch,
 
+    #[cfg_attr(feature = "std", error("invalid data"))]
+    InvalidData,
+
     #[cfg(feature = "std")]
     #[cfg_attr(feature = "std", error("IO error: {0}"))]
     Io(#[from] std::io::Error),
@@ -128,6 +131,7 @@ impl fmt::Display for WispError {
             Self::SessionDurationExceeded => write!(f, "session duration exceeded"),
             Self::KeyExchangeFailed => write!(f, "X25519 key exchange failed"),
             Self::KeyIdMismatch => write!(f, "key_id mismatch: no matching PSK in keyring"),
+            Self::InvalidData => write!(f, "invalid data"),
         }
     }
 }

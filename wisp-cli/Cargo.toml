@@ -8,3 +8,4 @@ wisp-core = { path = "../wisp-core" }
 wisp-net = { path = "../wisp-net" }
 tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt-multi-thread", "fs"] }
 clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"

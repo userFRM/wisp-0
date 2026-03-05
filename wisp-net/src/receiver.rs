@@ -1,17 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use wisp_core::chunk_id::h128;
 use wisp_core::chunker;
 use wisp_core::frame::Frame;
 use wisp_core::ict::Ict;
+use wisp_core::manifest::{self, Manifest, ManifestEntry};
 use wisp_core::recipe::Recipe;
 use wisp_core::recipe_ops;
 use wisp_core::replay::ReplayWindow;
 use wisp_core::ssx_decoder::SsxDecoder;
-use wisp_core::types::{ChunkId, SYMBOL_SIZE};
+use wisp_core::types::{ChunkId, Digest32, SYMBOL_SIZE};
 
 use crate::chunk_store::ChunkStore;
+use crate::progress::TransferProgress;
+use crate::resume::ResumeState;
 use crate::session::{Session, MAX_RETRIES};
 use crate::transport::{C0Transport, D0Transport};
 
@@ -86,16 +90,30 @@ impl AuthRateLimiter {
 /// Run the receiver state machine: wait for OFFER, send HAVE_ICT, decode SYM+MIX, COMMIT.
 ///
 /// Returns the reassembled file data on success.
+///
+/// If `resume` is provided, verified chunks are persisted to disk as they are decoded.
+/// On a subsequent run with the same resume directory, previously-decoded chunks are
+/// loaded from disk and appear as "already have" in the ICT — reducing re-transfer.
+/// After successful COMMIT, the resume state is cleaned up.
 pub async fn run_receiver(
     session: &mut Session,
     c0: &mut C0Transport,
     d0: &D0Transport,
     base_data: Option<&[u8]>,
+    resume: Option<&ResumeState>,
 ) -> std::io::Result<Vec<u8>> {
     let mut store = ChunkStore::new();
+
+    // Load previously-decoded chunks from resume state, if any.
+    if let Some(rs) = &resume {
+        for (id, data) in rs.load_chunks()? {
+            store.insert(id, data);
+        }
+    }
+
     let base_recipe = match base_data {
         Some(base) => {
-            let base_chunks = chunker::chunk(base);
+            let base_chunks = chunker::chunk_fast(base);
             let meta: Vec<(ChunkId, usize)> = base_chunks.iter().map(|(id, d)| {
                 store.insert(*id, d.clone());
                 (*id, d.len())
@@ -152,6 +170,10 @@ pub async fn run_receiver(
                 session.send_control(c0, &ack, base_digest).await?;
                 break;
             }
+            Frame::Ack { ack_frame_id } => {
+                session.record_ack(ack_frame_id);
+                continue;
+            }
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -206,6 +228,7 @@ pub async fn run_receiver(
         .collect();
     let expected_missing_recipe = Recipe::from_chunks(&missing_meta);
     let expected_missing_digest = expected_missing_recipe.digest();
+    let total_missing_bytes: u64 = missing_meta.iter().map(|(_, len)| *len as u64).sum();
 
     // --- R1: ReceivingData ---
     // Wait for PLAN on C0.
@@ -281,6 +304,12 @@ pub async fn run_receiver(
 
     // Create decoder.
     let mut decoder = SsxDecoder::new(n as usize);
+    let mut progress = TransferProgress::new("Recv", total_missing_bytes);
+    let bytes_per_symbol = if n == 0 {
+        0.0
+    } else {
+        total_missing_bytes as f64 / n as f64
+    };
 
     // Receive SYM and MIX frames on D0, control frames on C0.
     // Bind D0 acceptance to C0 peer IP (TCP-authenticated) + session_id.
@@ -391,6 +420,10 @@ pub async fn run_receiver(
                 let current_known = decoder.known_count();
                 if current_known > last_known_count {
                     last_known_count = current_known;
+                    if bytes_per_symbol > 0.0 {
+                        let done = (current_known as f64 * bytes_per_symbol).round() as u64;
+                        progress.set(done);
+                    }
                     needmore_sent = 0;
                     needmore_deadline = tokio::time::Instant::now() + NEEDMORE_THRESHOLD;
                 }
@@ -420,6 +453,7 @@ pub async fn run_receiver(
         }
 
         if decoder.is_complete() {
+            progress.finish();
             break;
         }
     }
@@ -474,6 +508,10 @@ pub async fn run_receiver(
                 ),
             ));
         }
+        // Persist to disk for resume if configured.
+        if let Some(rs) = &resume {
+            rs.save_chunk(&entry.chunk_id, &chunk_data)?;
+        }
         store.insert(entry.chunk_id, chunk_data);
     }
 
@@ -525,5 +563,167 @@ pub async fn run_receiver(
         }
     }
 
+    // Clean up resume state after successful transfer.
+    if let Some(rs) = &resume {
+        let _ = rs.cleanup();
+    }
+
     Ok(file_data)
+}
+
+/// Build a manifest from a local directory for comparison.
+fn build_local_manifest(dir: &Path) -> std::io::Result<Manifest> {
+    let mut entries = Vec::new();
+    walk_dir_manifest(dir, dir, &mut entries)?;
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Manifest { entries })
+}
+
+fn walk_dir_manifest(
+    base: &Path,
+    dir: &Path,
+    entries: &mut Vec<ManifestEntry>,
+) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir_manifest(base, &path, entries)?;
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let data = std::fs::read(&path)?;
+            let chunks = chunker::chunk_fast(&data);
+            let meta: Vec<(ChunkId, usize)> = chunks.iter().map(|(id, d)| (*id, d.len())).collect();
+            let recipe = Recipe::from_chunks(&meta);
+            let digest = recipe.digest();
+            entries.push(ManifestEntry {
+                path: rel_str,
+                size: data.len() as u64,
+                recipe_digest: digest,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Receive a directory tree from a remote sender.
+///
+/// Protocol: MANIFEST → MANIFEST_ACK → per-file OFFER/HAVE_ICT/PLAN/SYM+MIX/COMMIT.
+pub async fn run_receiver_dir(
+    session: &mut Session,
+    c0: &mut C0Transport,
+    d0: &D0Transport,
+    out_dir: &Path,
+) -> std::io::Result<()> {
+    let base_digest = Digest32::default();
+
+    // Wait for MANIFEST from sender.
+    let sender_manifest: Manifest;
+    let mut retries = 0u32;
+    loop {
+        let recv_result = tokio::time::timeout(session.control_timeout(), c0.recv_frame()).await;
+        let (hdr, payload) = match recv_result {
+            Err(_) if retries < MAX_RETRIES => {
+                retries += 1;
+                session.resend_unacked(c0).await?;
+                continue;
+            }
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for MANIFEST",
+                ));
+            }
+            Ok(result) => result?,
+        };
+        retries = 0;
+        let frame = Frame::decode_payload(hdr.frame_type, &payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
+        match frame {
+            Frame::Manifest { data } => {
+                sender_manifest = Manifest::decode_wire(&data)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                let ack = Frame::Ack { ack_frame_id: hdr.frame_id };
+                session.send_control(c0, &ack, base_digest).await?;
+                break;
+            }
+            Frame::Ack { ack_frame_id } => {
+                session.record_ack(ack_frame_id);
+                continue;
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("expected MANIFEST, got {:?}", frame),
+                ));
+            }
+        }
+    }
+
+    eprintln!("Received manifest: {} files", sender_manifest.entries.len());
+
+    // Build local manifest and diff.
+    let local_manifest = build_local_manifest(out_dir)?;
+    let diff = local_manifest.diff(&sender_manifest);
+
+    // Files we need: added + changed.
+    let needed: Vec<&str> = diff
+        .added
+        .iter()
+        .chain(diff.changed.iter().map(|(_, new)| new))
+        .map(|e| e.path.as_str())
+        .collect();
+
+    eprintln!(
+        "{} added, {} changed, {} unchanged, {} removed",
+        diff.added.len(),
+        diff.changed.len(),
+        diff.unchanged.len(),
+        diff.removed.len(),
+    );
+
+    // Send MANIFEST_ACK with needed file paths.
+    let ack_frame = Frame::ManifestAck {
+        files_needed: manifest::encode_paths_wire(&needed),
+    };
+    session.send_control(c0, &ack_frame, base_digest).await?;
+
+    if needed.is_empty() {
+        eprintln!("All files up to date.");
+        return Ok(());
+    }
+
+    // Receive each needed file using the standard single-file protocol.
+    // Increment update_id per file to match sender and distinguish D0 frames.
+    std::fs::create_dir_all(out_dir)?;
+    for (i, path) in needed.iter().enumerate() {
+        session.params.update_id = (i + 1) as u64;
+        eprintln!("[{}/{}] Receiving {}...", i + 1, needed.len(), path);
+        let data = run_receiver(session, c0, d0, None, None).await?;
+        let out_path = out_dir.join(path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&out_path, &data)?;
+        eprintln!("  {} bytes -> {}", data.len(), out_path.display());
+    }
+
+    // Remove files that were deleted on sender side.
+    for path in &diff.removed {
+        let rm_path = out_dir.join(path);
+        if rm_path.exists() {
+            std::fs::remove_file(&rm_path)?;
+            eprintln!("Removed: {}", path);
+        }
+    }
+
+    eprintln!("Directory sync complete.");
+    Ok(())
 }

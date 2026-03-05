@@ -66,7 +66,11 @@ pub fn decode_ops(data: &[u8]) -> Result<Vec<RecipeOp>> {
             OP_LIT => {
                 let (count, new_off) = varint::decode(data, off)?;
                 off = new_off;
-                let mut entries = Vec::with_capacity(count as usize);
+                // Each entry is at least 17 bytes (16-byte ChunkId + 1-byte varint).
+                let remaining = data.len().saturating_sub(off);
+                let max_entries = remaining / 17;
+                let cap = (count as usize).min(max_entries);
+                let mut entries = Vec::with_capacity(cap);
                 for _ in 0..count {
                     if off + 16 > data.len() {
                         return Err(WispError::BufferUnderflow);
@@ -182,7 +186,8 @@ pub fn apply(base: &Recipe, ops_data: &[u8]) -> Result<Recipe> {
             RecipeOp::End => break,
             RecipeOp::Copy { base_index, count } => {
                 let start = *base_index as usize;
-                let end = start + *count as usize;
+                let end = start.checked_add(*count as usize)
+                    .ok_or(WispError::BufferUnderflow)?;
                 if end > base.entries.len() {
                     return Err(WispError::BufferUnderflow);
                 }

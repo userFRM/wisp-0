@@ -1,0 +1,51 @@
+[package]
+name = "wisp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wisp-core = { path = "../wisp-core" }
+arbitrary = { version = "1", features = ["derive"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_frame_header"
+path = "fuzz_targets/fuzz_frame_header.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_frame_payload"
+path = "fuzz_targets/fuzz_frame_payload.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ict_decode"
+path = "fuzz_targets/fuzz_ict_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_recipe_decode"
+path = "fuzz_targets/fuzz_recipe_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_recipe_ops"
+path = "fuzz_targets/fuzz_recipe_ops.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ssx_decoder"
+path = "fuzz_targets/fuzz_ssx_decoder.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_varint"
+path = "fuzz_targets/fuzz_varint.rs"
+doc = false

@@ -173,6 +173,55 @@ pub fn chunk_fast(data: &[u8]) -> Vec<(ChunkId, Vec<u8>)> {
     result
 }
 
+/// Like `chunk_fast` but returns borrowed slices instead of owned `Vec<u8>`.
+///
+/// Produces identical boundaries and ChunkIds as `chunk_fast`. Use this when
+/// the input data is memory-mapped or otherwise long-lived, to avoid copying
+/// chunk bytes.
+pub fn chunk_fast_ref(data: &[u8]) -> Vec<(ChunkId, &[u8])> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    let mut h = 0u64;
+    let mut chunk_start = 0usize;
+    let mut i = 0usize;
+
+    while i < data.len() {
+        while i + 32 <= data.len() && (i - chunk_start) + 32 < MIN {
+            let base = i;
+            for j in 0..32 {
+                h = gear_update(h, data[base + j]);
+            }
+            i += 32;
+        }
+
+        if i >= data.len() {
+            break;
+        }
+        h = gear_update(h, data[i]);
+        i += 1;
+        let chunk_size = i - chunk_start;
+        let is_boundary = (chunk_size >= MIN && (h & MASK) == 0) || chunk_size == MAX;
+        if is_boundary {
+            let slice = &data[chunk_start..i];
+            let id = h128(slice);
+            result.push((id, slice));
+            chunk_start = i;
+            h = 0;
+        }
+    }
+
+    if chunk_start < data.len() {
+        let slice = &data[chunk_start..];
+        let id = h128(slice);
+        result.push((id, slice));
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +404,17 @@ mod tests {
 
         let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.1.iter().copied()).collect();
         assert_eq!(reassembled, data);
+    }
+
+    #[test]
+    fn chunk_fast_ref_matches_chunk_fast() {
+        let data: Vec<u8> = (0u32..300_000).map(|i| (i.wrapping_mul(747796405) >> 9) as u8).collect();
+        let owned = chunk_fast(&data);
+        let borrowed = chunk_fast_ref(&data);
+        assert_eq!(owned.len(), borrowed.len());
+        for (o, b) in owned.iter().zip(borrowed.iter()) {
+            assert_eq!(o.0, b.0, "ChunkId mismatch");
+            assert_eq!(o.1.as_slice(), b.1, "data mismatch");
+        }
     }
 }

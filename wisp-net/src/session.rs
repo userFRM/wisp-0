@@ -49,28 +49,71 @@ impl RttEstimator {
     }
 }
 
-/// Enforces a minimum inter-packet interval on D0 sends.
-struct SendPacer {
-    interval: Duration,
+/// AIMD congestion controller for D0 send pacing.
+///
+/// Slow start: cwnd doubles per RTT until ssthresh.
+/// Congestion avoidance: cwnd += 1/cwnd per ACK (additive increase).
+/// Loss (NEEDMORE or timeout): ssthresh = cwnd/2, cwnd = ssthresh (multiplicative decrease).
+/// Pacing: inter-packet gap = rtt / cwnd, clamped to [10µs, 10ms].
+pub struct CongestionController {
+    cwnd: f64,
+    ssthresh: f64,
+    in_flight: u64,
     last_send: Option<tokio::time::Instant>,
 }
 
-impl SendPacer {
-    fn new(interval: Duration) -> Self {
+impl CongestionController {
+    const INITIAL_CWND: f64 = 10.0;
+    const MIN_CWND: f64 = 2.0;
+    const MAX_CWND: f64 = 10_000.0;
+
+    fn new() -> Self {
         Self {
-            interval,
+            cwnd: Self::INITIAL_CWND,
+            ssthresh: Self::MAX_CWND,
+            in_flight: 0,
             last_send: None,
         }
     }
 
-    async fn pace(&mut self) {
+    /// Pace sending: sleep for rtt/cwnd interval since last send.
+    async fn pace(&mut self, rtt: &RttEstimator) {
         if let Some(last) = self.last_send {
+            let gap_secs = rtt.avg / self.cwnd;
+            let gap = Duration::from_secs_f64(gap_secs.clamp(10e-6, 10e-3));
             let elapsed = tokio::time::Instant::now().duration_since(last);
-            if elapsed < self.interval {
-                tokio::time::sleep(self.interval - elapsed).await;
+            if elapsed < gap {
+                tokio::time::sleep(gap - elapsed).await;
             }
         }
         self.last_send = Some(tokio::time::Instant::now());
+    }
+
+    /// Record a sent packet.
+    fn on_send(&mut self) {
+        self.in_flight += 1;
+    }
+
+    /// Implicit ACK: decoder made progress. Increase window.
+    pub fn on_progress(&mut self, packets: u64) {
+        self.in_flight = self.in_flight.saturating_sub(packets);
+        for _ in 0..packets {
+            if self.cwnd < self.ssthresh {
+                // Slow start: double cwnd per RTT (one +1 per ACK).
+                self.cwnd += 1.0;
+            } else {
+                // Congestion avoidance: cwnd += 1/cwnd per ACK.
+                self.cwnd += 1.0 / self.cwnd;
+            }
+        }
+        self.cwnd = self.cwnd.min(Self::MAX_CWND);
+    }
+
+    /// Loss detected (NEEDMORE or timeout). Halve window.
+    pub fn on_loss(&mut self) {
+        self.ssthresh = (self.cwnd / 2.0).max(Self::MIN_CWND);
+        self.cwnd = self.ssthresh;
+        self.in_flight = 0;
     }
 }
 
@@ -109,8 +152,8 @@ pub struct Session {
     rtt: RttEstimator,
     /// Send timestamps for RTT measurement (frame_id -> sent_at).
     send_times: HashMap<u64, Instant>,
-    /// D0 send pacer (100µs default inter-packet gap).
-    d0_pacer: SendPacer,
+    /// D0 congestion controller (AIMD).
+    pub cc: CongestionController,
 }
 
 impl Drop for Session {
@@ -133,7 +176,7 @@ impl Session {
             started_at: Instant::now(),
             rtt: RttEstimator::new(),
             send_times: HashMap::new(),
-            d0_pacer: SendPacer::new(Duration::from_micros(100)),
+            cc: CongestionController::new(),
         }
     }
 
@@ -146,6 +189,11 @@ impl Session {
         let id = self.next_frame_id;
         self.next_frame_id += 1;
         id
+    }
+
+    /// Returns the frame_id assigned to the most recently sent control frame.
+    pub fn last_sent_frame_id(&self) -> u64 {
+        self.next_frame_id - 1
     }
 
     /// Check session limits (frame count and duration).
@@ -260,7 +308,7 @@ impl Session {
         Ok(fid)
     }
 
-    /// Send a data frame on D0 with inter-packet pacing.
+    /// Send a data frame on D0 with congestion-controlled pacing.
     pub async fn send_data(
         &mut self,
         d0: &D0Transport,
@@ -269,7 +317,8 @@ impl Session {
         peer: SocketAddr,
     ) -> std::io::Result<()> {
         self.check_session_limits()?;
-        self.d0_pacer.pace().await;
+        self.cc.pace(&self.rtt).await;
+        self.cc.on_send();
         let payload = frame.encode_payload();
         let header = self.make_data_header(frame, payload.len() as u32, base_digest);
         d0.send_frame(&header, &payload, peer).await?;
@@ -629,23 +678,61 @@ mod tests {
         assert!(ct.as_secs_f64() >= 1.4 && ct.as_secs_f64() <= 1.6);
     }
 
-    #[tokio::test]
-    async fn pacer_first_call_immediate() {
-        let mut pacer = SendPacer::new(Duration::from_secs(10));
-        let start = tokio::time::Instant::now();
-        pacer.pace().await;
-        let elapsed = start.elapsed();
-        // First call should return nearly instantly.
-        assert!(elapsed < Duration::from_millis(50));
+    #[test]
+    fn cc_initial_cwnd() {
+        let cc = CongestionController::new();
+        assert_eq!(cc.cwnd, CongestionController::INITIAL_CWND);
+    }
+
+    #[test]
+    fn cc_slow_start_increases() {
+        let mut cc = CongestionController::new();
+        let initial = cc.cwnd;
+        cc.on_progress(5);
+        assert!(cc.cwnd > initial, "slow start should increase cwnd");
+    }
+
+    #[test]
+    fn cc_loss_halves() {
+        let mut cc = CongestionController::new();
+        cc.cwnd = 100.0;
+        cc.on_loss();
+        assert!((cc.cwnd - 50.0).abs() < 0.1);
+        assert!((cc.ssthresh - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn cc_cwnd_bounds() {
+        let mut cc = CongestionController::new();
+        // Push cwnd to max.
+        cc.on_progress(100_000);
+        assert!(cc.cwnd <= CongestionController::MAX_CWND);
+
+        // Loss should respect minimum.
+        cc.cwnd = CongestionController::MIN_CWND;
+        cc.on_loss();
+        assert!(cc.cwnd >= CongestionController::MIN_CWND);
+    }
+
+    #[test]
+    fn cc_congestion_avoidance() {
+        let mut cc = CongestionController::new();
+        cc.ssthresh = 10.0;
+        cc.cwnd = 10.0; // at ssthresh → congestion avoidance mode
+        let before = cc.cwnd;
+        cc.on_progress(1);
+        let delta = cc.cwnd - before;
+        // In CA mode, delta should be ~1/cwnd = 0.1, not 1.0.
+        assert!(delta < 0.5, "CA mode should grow slowly, got delta={delta}");
     }
 
     #[tokio::test]
-    async fn pacer_enforces_interval() {
-        let mut pacer = SendPacer::new(Duration::from_millis(50));
-        pacer.pace().await; // first call, immediate
+    async fn cc_pace_first_call_immediate() {
+        let mut cc = CongestionController::new();
+        let rtt = RttEstimator::new();
         let start = tokio::time::Instant::now();
-        pacer.pace().await; // second call, should wait ~50ms
+        cc.pace(&rtt).await;
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(40), "pacer should enforce interval");
+        assert!(elapsed < Duration::from_millis(50));
     }
 }

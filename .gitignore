@@ -1,2 +1,4 @@
 /target
 conv.html
+fuzz/corpus/
+fuzz/artifacts/
